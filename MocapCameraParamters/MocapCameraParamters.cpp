@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <conio.h>
+#include <direct.h>
 #include <iostream>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,8 +8,9 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
-#include <gl/GL.h>
-#include <gl/GLU.h>
+#include <string.h>
+#include <sys/types.h> 
+#include <sys/stat.h> 
 
 //Opencv libs
 #include <opencv2/core/core.hpp>
@@ -17,6 +19,7 @@
 #include <opencv2/calib3d/calib3d_c.h>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/opencv.hpp>
 
 #include <NPTrackingTools.h>
 
@@ -29,6 +32,7 @@ vector<Mat> getCameraExtrinsic();
 Mat getCameraIntrinsic(int cameraIndex);
 void writeToFile(float markerX, float markerY, float markerZ, float camU, float camV, int cameraIndex, int frameIndex);
 void visualizeFrustum(float markerX, float markerY, float markerZ, float camU, float camV, int cameraIndex, int frameIndex);
+int findCameraIndex(int targetCam);
 
 // Global variables
 fstream foutCalibPair;
@@ -45,8 +49,8 @@ public:
         printf("Camera Disconnected: Serial #%d\n", serialNumber);
     }
 };
-
 int main(int argc, char* argv[]) {
+
     printf("== NaturalPoint Tracking Tools API Marker Sample =======---\n");
     printf("== (C) NaturalPoint, Inc.\n\n");
 
@@ -65,57 +69,103 @@ int main(int argc, char* argv[]) {
     myListener listener;
     TT_AttachListener(&listener);
 
-    // Do an update to pick up any recently-arrived cameras.
-    TT_Update();
+    // Index of camera to calibrate
+    int targetCam = 2;
+    int targetCamIndex = findCameraIndex(targetCam);
+    int frameCounter = 0;
+    int saveFrameCounter = 0;
+    //== Displaying all connected cameras ==//
+    int totalCamera = TT_CameraCount();
 
-    printf("[#]Before loading profile ===> CameraFrameRate : %d\n", TT_CameraFrameRate(1));
     // Load a project file from the executable directory.
     printf("[#]Loading Profile: UserProfile.motive\n");
     CheckResult(TT_LoadProfile("C:\\Users\\VISTEC-DroneLab\\Desktop\\Mint\\Motive Profile.motive"));
-
+    printf("[#]Before loading profile ===> CameraFrameRate : %d\n", TT_CameraFrameRate(targetCamIndex));
 
     // Load a calibration file from the executable directory
     printf("[#]Loading Calibration: Calibration.cal\n");
     CheckResult(TT_LoadCalibration("C:\\Users\\VISTEC-DroneLab\\Desktop\\Mint\\CalibrationResult 2020-06-03 10.cal"));
     
-    printf("[#]After loading profile ===> CameraFrameRate : %d\n", TT_CameraFrameRate(1));
+    printf("[#]After loading profile ===> CameraFrameRate : %d\n", TT_CameraFrameRate(targetCamIndex));
     printf("Number of camers : %d\n", TT_CameraCount());
 
     Sleep(2000);
 
-    printf("[#]Finding Pair of 2D-3D points for camera calibration\n");
-    // Index of camera to calibrate
-    int targetCam = 2;
+    // Create folder to store image
+    string outputFolder = "CaptureImage//";
+    _mkdir(outputFolder.c_str());
 
-    int frameCounter = 0;
-    // Poll API data until the user hits a keyboard key.
+	// Sample code for saving frame buffer from a camera (index 0)
+	int reswidth;
+	int resheight;
+	int bytespan;
+
+	// Camera Settings 
+	int exposure = 2577;
+	int intensity = 10;
+	int grayScaleMode = 1;
+	int threshold = 200;
+	// Obtaining pixel resolution
+	TT_SetCameraSettings(targetCamIndex, grayScaleMode, exposure, threshold, intensity);
+	TT_CameraPixelResolution(targetCamIndex, reswidth, resheight);
+	printf("Camera #%d:\tWidth:%d\tHeight:%d\n", targetCam, reswidth, resheight);
+
+	// Allocating memory block for the buffer
+	unsigned char* frameBuffer = (unsigned char*)std::malloc(reswidth * resheight * 1);
+	// Defining stuff for opencv Mat datatype and imwrite
+	bytespan = reswidth;
+	Mat image;
+    vector<int> compression_params;
+    compression_params.push_back(IMWRITE_PNG_COMPRESSION);
+    compression_params.push_back(5);
 
     vector<Mat> cameraExtrinsic = getCameraExtrinsic();
+    cout << "Camera " << targetCam << " : Extrinsic\n" << cameraExtrinsic[targetCamIndex] << endl;
     //Mat cameraIntrinsic = getCameraIntrinsic(targetCam);
     while (!_kbhit())
     {
         if (TT_Update() == NPRESULT_SUCCESS)
         {
             frameCounter++;
+
 			printf("Frame : %d ===> Number of marker : %d\n", frameCounter, TT_FrameMarkerCount());
 			for (int i = 0; i < TT_FrameMarkerCount(); i++)
 			{
 				float markerX = TT_FrameMarkerX(i);
 				float markerY = TT_FrameMarkerY(i);
 				float markerZ = TT_FrameMarkerZ(i);
-				float cam2dx;
-				float cam2dy;
-				TT_CameraBackproject(targetCam, markerX, markerY, markerZ, cam2dx, cam2dy);
+				float camU;
+				float camV;
+				TT_CameraBackproject(targetCam, markerX, markerY, markerZ, camU, camV);
 				printf("World : (%f, %f, %f) <===> ", markerX, markerY, markerZ);
-				printf("Screen : (%f, %f)\n", cam2dx, cam2dy);
+				printf("Screen : (%f, %f)\n", camU, camV);
+                //visualizeFrustum(markerX, markerY, markerZ, camU, camV, targetCam, frameCounter);
 			}
+
+			bool result = TT_CameraFrameBuffer(targetCam, reswidth, resheight, bytespan, 8, frameBuffer);
+			if (result == true)
+			{
+				image = Mat(Size(reswidth, resheight), CV_8UC1, frameBuffer);
+				imshow("FRAME", image);
+				if (waitKey(1) == (char)115) {
+                    saveFrameCounter++;
+					cout << "[#] " << saveFrameCounter << " Images saved." << endl;
+                    string filename = outputFolder + (string)"image" + to_string(saveFrameCounter) + string(".png");
+					imwrite(filename, image, compression_params);
+				}
+            }
         }
     }
-
+    destroyAllWindows();
 	return 0;
 }
 
+
 void visualizeFrustum(float markerX, float markerY, float markerZ, float camU, float camV, int cameraIndex, int frameIndex) {
+    //glBegin(GL_LINES);
+    //glVertex2f(10, 10);
+    //glVertex2f(20, 20);
+    //glEnd();
 }
 
 double computeReprojectionErrors(const vector< vector< Point3f > >& objectPoints,
@@ -138,6 +188,47 @@ double computeReprojectionErrors(const vector< vector< Point3f > >& objectPoints
         totalPoints += n;
     }
     return std::sqrt(totalErr / totalPoints);
+}
+
+int findCameraIndex(int targetCam) {
+    //Mapping between targetCam and real index
+    int targetCamSerial = 0;
+    switch (targetCam) {
+		case 1:
+            targetCamSerial = 86812;
+            break;
+		case 2:
+            targetCamSerial = 86816;
+            break;
+		case 3:
+            targetCamSerial = 86727;
+            break;
+		case 4:
+            targetCamSerial = 86815;
+            break;
+		case 5:
+            targetCamSerial = 86809;
+            break;
+		case 6:
+            targetCamSerial = 86807;
+            break;
+		case 7:
+            targetCamSerial = 86808;
+            break;
+		case 8:
+            targetCamSerial = 86806;
+            break;
+    }
+    //== Displaying all connected cameras ==//
+    int totalCamera = TT_CameraCount();
+    printf("Detected Cameras Serial Numbers:\n");
+    for (int i = 0; i < totalCamera; i++)
+    {
+        if (targetCamSerial == TT_CameraSerial(i)) {
+            return i;
+        }
+    }
+    return 0;
 }
 
 Mat getCameraIntrinsic(int cameraIndex) {
@@ -230,18 +321,18 @@ vector<Mat> getCameraExtrinsic() {
 		for (int j = 0; j < 3; j++) {
             for (int k = 0; k < 3; k++) {
                 eachExtrinsic.at<float>(j, k) = TT_CameraOrientationMatrix(i, k + (3 * j)), k + (3 * j);
-                printf("\t%f (index %d)", TT_CameraOrientationMatrix(i, k + (3 * j)), k + (3 * j));
+                //printf("\t%f (index %d)", TT_CameraOrientationMatrix(i, k + (3 * j)), k + (3 * j));
             }
             eachExtrinsic.at<float>(j, 3) = translationVector[j];
-            printf("\n\n");
+            //printf("\n\n");
         }
         eachExtrinsic.convertTo(eachExtrinsic, CV_32F);
         cameraExtrinsic.push_back(eachExtrinsic);
     }
     // Display the Camera Extrinsic
-	printf("Camera Extrinsic: \n");
+	//printf("Camera Extrinsic: \n");
     for (int i = 0; i < numberOfCamera; i++) {
-		cout << cameraExtrinsic[i] << endl;
+		//cout << cameraExtrinsic[i] << endl;
     }
     return cameraExtrinsic;
 }
